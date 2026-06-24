@@ -1,3 +1,4 @@
+const { ObjectId } = require("mongodb"); // add this import at the top of server.js
 const express = require("express");
 const app = express();
 const dotenv = require("dotenv");
@@ -32,32 +33,81 @@ async function run() {
     //collections
     const sellerCollection = db.collection("sellerProducts");
 
+    //Seller products api
 
+    //Get All products added by seller:
+    app.get("/api/sellerProducts/:email", async (req, res) => {
+      const email = req.params.email;
+      const query = { sellerEmail: email };
+      const result = await sellerCollection.find(query).toArray();
+      res.send(result);
+    });
+
+    //added product for seller
     app.post("/api/addedProduct", async (req, res) => {
       const {
         productImage,
         productTitle,
         description,
         category,
-   
+        price,
         condition,
         quantity,
         sellerEmail,
       } = req.body;
       const addData = {
-         productImage,
+        productImage,
         productTitle,
         description,
         category,
         condition,
-
+        price,
         quantity,
         sellerEmail,
         createdAt: new Date(),
-      }
+      };
       const result = await sellerCollection.insertOne(addData);
       res.send(result);
+    });
 
+    // UPDATE a product by _id
+    app.put("/api/sellerProducts/:id", async (req, res) => {
+      const id = req.params.id;
+      const {
+        productTitle,
+        category,
+        condition,
+        price,
+        quantity,
+        description,
+      } = req.body;
+
+      const updatedFields = {
+        $set: {
+          productTitle,
+          category,
+          condition,
+          price: Number(price),
+          quantity: Number(quantity),
+          description,
+          updatedAt: new Date(),
+        },
+      };
+
+      const result = await sellerCollection.updateOne(
+        { _id: new ObjectId(id) },
+        updatedFields,
+      );
+      res.send(result);
+    });
+
+    // DELETE a product by _id
+    app.delete("/api/sellerProducts/:id", async (req, res) => {
+      const id = req.params.id;
+      const result = await sellerCollection.deleteOne({
+        _id: new ObjectId(id),
+      });
+      res.send(result);
     });
 
     // Send a ping to confirm a successful connection
