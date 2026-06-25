@@ -33,6 +33,34 @@ async function run() {
     //collections
     const sellerCollection = db.collection("sellerProducts");
 
+    // GET all products (for public browse page)
+    app.get("/api/products", async (req, res) => {
+      const { category, condition, search, sort } = req.query;
+
+      const query = { status: "available" };
+
+      if (category) query.category = category;
+      if (condition) query.condition = condition;
+      if (search) query.title = { $regex: search, $options: "i" };
+
+      let sortOption = { createdAt: -1 }; // newest first by default
+      if (sort === "price_asc") sortOption = { price: 1 };
+      if (sort === "price_desc") sortOption = { price: -1 };
+
+      const result = await sellerCollection
+        .find(query)
+        .sort(sortOption)
+        .toArray();
+      res.send(result);
+    });
+    // GET single product by id (public)
+    app.get("/api/products/:id", async (req, res) => {
+      const id = req.params.id;
+      const result = await sellerCollection.findOne({ _id: new ObjectId(id) });
+      if (!result) return res.status(404).json({ error: "Product not found" });
+      res.send(result);
+    });
+
     //Seller products api
 
     //Get All products added by seller:
@@ -50,7 +78,7 @@ async function run() {
       if (!result) return res.status(404).json({ error: "Product not found" });
       res.send(result);
     });
-    
+
     //added product for seller
     app.post("/api/addedProduct", async (req, res) => {
       const {
