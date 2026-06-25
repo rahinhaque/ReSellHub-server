@@ -32,6 +32,7 @@ async function run() {
 
     //collections
     const sellerCollection = db.collection("sellerProducts");
+    const wishlistCollection = db.collection("wishlist");
 
     // GET all products (for public browse page)
     app.get("/api/products", async (req, res) => {
@@ -151,6 +152,99 @@ async function run() {
         _id: new ObjectId(id),
       });
       res.send(result);
+    });
+
+    //buyer dashbaord api-----------------------
+    // Add to wishlist
+    app.post("/api/wishlist", async (req, res) => {
+      try {
+        const {
+          productId,
+          userId,
+          userEmail,
+          title,
+          price,
+          image,
+          sellerInfo,
+        } = req.body;
+
+        if (!productId || (!userId && !userEmail)) {
+          return res.status(400).json({
+            error: "productId and userId or userEmail are required",
+          });
+        }
+
+        const existing = await wishlistCollection.findOne({
+          productId,
+          $or: [
+            userId ? { userId } : null,
+            userEmail ? { userEmail } : null,
+          ].filter(Boolean),
+        });
+
+        if (existing) {
+          return res.status(409).json({ error: "Already in wishlist" });
+        }
+
+        const item = {
+          productId,
+          userId: userId || "",
+          userEmail: userEmail || "",
+          title: title || "",
+          price: Number(price) || 0,
+          image: image || "",
+          sellerInfo: sellerInfo || null,
+          createdAt: new Date(),
+        };
+
+        const result = await wishlistCollection.insertOne(item);
+        res.send(result);
+      } catch (error) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+
+    // Get wishlist by email
+    app.get("/api/wishlist/:email", async (req, res) => {
+      try {
+        const email = req.params.email;
+        const result = await wishlistCollection
+          .find({ userEmail: email })
+          .sort({ createdAt: -1 })
+          .toArray();
+
+        res.send(result);
+      } catch (error) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+
+    // Get wishlist by userId
+    app.get("/api/wishlist/user/:userId", async (req, res) => {
+      try {
+        const userId = req.params.userId;
+        const result = await wishlistCollection
+          .find({ userId })
+          .sort({ createdAt: -1 })
+          .toArray();
+
+        res.send(result);
+      } catch (error) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+
+    // Remove wishlist item
+    app.delete("/api/wishlist/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+        const result = await wishlistCollection.deleteOne({
+          _id: new ObjectId(id),
+        });
+        res.send(result);
+      } catch (error) {
+        res.status(500).json({ error: error.message });
+      }
     });
 
     // Send a ping to confirm a successful connection
