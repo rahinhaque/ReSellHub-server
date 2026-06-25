@@ -38,34 +38,45 @@ async function run() {
     //Get All products added by seller:
     app.get("/api/sellerProducts/:email", async (req, res) => {
       const email = req.params.email;
-      const query = { sellerEmail: email };
+      const query = { "sellerInfo.email": email }; // ← nested field query
       const result = await sellerCollection.find(query).toArray();
       res.send(result);
     });
 
+    // GET single product by id
+    app.get("/api/sellerProducts/product/:id", async (req, res) => {
+      const id = req.params.id;
+      const result = await sellerCollection.findOne({ _id: new ObjectId(id) });
+      if (!result) return res.status(404).json({ error: "Product not found" });
+      res.send(result);
+    });
+    
     //added product for seller
     app.post("/api/addedProduct", async (req, res) => {
       const {
-        productImage,
-        productTitle,
+        title,
         description,
         category,
-        price,
         condition,
+        price,
         quantity,
-        sellerEmail,
+        images,
+        sellerInfo,
       } = req.body;
+
       const addData = {
-        productImage,
-        productTitle,
+        title,
         description,
         category,
         condition,
-        price,
-        quantity,
-        sellerEmail,
+        price: Number(price),
+        quantity: Number(quantity),
+        images, // array of image URLs
+        sellerInfo, // { userId, name, email, phone }
+        status: "available",
         createdAt: new Date(),
       };
+
       const result = await sellerCollection.insertOne(addData);
       res.send(result);
     });
@@ -74,22 +85,26 @@ async function run() {
     app.put("/api/sellerProducts/:id", async (req, res) => {
       const id = req.params.id;
       const {
-        productTitle,
+        title,
         category,
         condition,
         price,
         quantity,
         description,
+        images,
+        status,
       } = req.body;
 
       const updatedFields = {
         $set: {
-          productTitle,
+          title,
           category,
           condition,
           price: Number(price),
           quantity: Number(quantity),
           description,
+          images,
+          status,
           updatedAt: new Date(),
         },
       };
