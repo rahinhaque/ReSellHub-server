@@ -5,6 +5,8 @@ const dotenv = require("dotenv");
 dotenv.config();
 const cors = require("cors");
 const port = process.env.PORT || 5000;
+const Stripe = require("stripe");
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 app.use(cors());
 app.use(express.json());
@@ -33,6 +35,8 @@ async function run() {
     //collections
     const sellerCollection = db.collection("sellerProducts");
     const wishlistCollection = db.collection("wishlist");
+    const ordersCollection = db.collection("orders");
+    const paymentsCollection = db.collection("payments");
 
     // GET all products (for public browse page)
     app.get("/api/products", async (req, res) => {
@@ -244,6 +248,196 @@ async function run() {
         res.send(result);
       } catch (error) {
         res.status(500).json({ error: error.message });
+      }
+    });
+
+    //stripe
+    // POST /api/create-checkout-session
+    app.post("/api/create-checkout-session", async (req, res) => {
+      const {
+        productId,
+        productTitle,
+        productImage,
+        price,
+        buyerEmail,
+        buyerName,
+        buyerId,
+        sellerId,
+        sellerName,
+        sellerEmail,
+      } = req.body;
+
+      try {
+        const session = await stripe.checkout.sessions.create({
+          payment_method_types: ["card"],
+          mode: "payment",
+          customer_email: buyerEmail,
+          line_items: [
+            {
+              price_data: {
+                currency: "usd",
+                product_data: {
+                  name: productTitle,
+                  images: productImage ? [productImage] : [],
+                },
+                unit_amount: Math.round(price * 100),
+              },
+              quantity: 1,
+            },
+          ],
+          metadata: {
+            productId,
+            buyerId,
+            buyerName,
+            buyerEmail,
+            sellerId,
+            sellerName,
+            sellerEmail,
+            productTitle,
+            price: String(price),
+          },
+          success_url: `${process.env.CLIENT_URL}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
+          cancel_url: `${process.env.CLIENT_URL}/products/${productId}`,
+        });
+
+        res.json({ url: session.url, sessionId: session.id });
+      } catch (err) {
+        console.error("Stripe error:", err);
+        res.status(500).json({ error: err.message });
+      }
+    });
+
+    // POST /api/orders/confirm
+    app.post("/api/orders/confirm", async (req, res) => {
+      const { sessionId } = req.body;
+
+      try {
+        // 1. Verify payment with Stripe
+        const session = await stripe.checkout.sessions.retrieve(sessionId);
+
+        if (session.payment_status !== "paid") {
+          return res.status(400).json({ error: "Payment not completed" });
+        }
+
+        // 2. Idempotency guard — prevent duplicate orders on refresh
+        const existing = await ordersCollection.findOne({
+          stripeSessionId: sessionId,
+        });
+        if (existing) {
+          return res.json({
+            success: true,
+            orderId: existing._id.toString(),
+            alreadyExists: true,
+          });
+        }
+
+        const meta = session.metadata;
+
+        // 3. Save order
+        const order = {
+          buyerInfo: {
+            userId: meta.buyerId,
+            name: meta.buyerName,
+            email: meta.buyerEmail,
+          },
+          sellerInfo: {
+            userId: meta.sellerId,
+            name: meta.sellerName,
+            email: meta.sellerEmail,
+          },
+          productId: meta.productId,
+          productTitle: meta.productTitle,
+          price: parseFloat(meta.price),
+          paymentStatus: "paid",
+          orderStatus: "processing",
+          stripeSessionId: sessionId,
+          createdAt: new Date(),
+        };
+
+        const orderResult = await ordersCollection.insertOne(order);
+        const orderId = orderResult.insertedId.toString();
+
+        // 4. Save payment
+        const payment = {
+          orderId,
+          transactionId: session.payment_intent,
+          amount: session.amount_total / 100,
+          paymentStatus: "success",
+          stripeSessionId: sessionId,
+          createdAt: new Date(),
+        };
+
+        await paymentsCollection.insertOne(payment);
+
+        // 5. Mark product as sold
+        await sellerCollection.updateOne(
+          { _id: new ObjectId(meta.productId) },
+          { $set: { status: "sold" } },
+        );
+
+        res.json({ success: true, orderId });
+      } catch (err) {
+        console.error("Order confirm error:", err);
+        res.status(500).json({ error: err.message });
+      }
+    });
+
+    // GET orders by buyer email
+    app.get("/api/orders/buyer/:email", async (req, res) => {
+      try {
+        const email = req.params.email;
+        const result = await ordersCollection
+          .find({ "buyerInfo.email": email })
+          .sort({ createdAt: -1 })
+          .toArray();
+        res.send(result);
+      } catch (err) {
+        res.status(500).json({ error: err.message });
+      }
+    });
+
+    // GET single order by id
+    app.get("/api/orders/:id", async (req, res) => {
+      try {
+        const result = await ordersCollection.findOne({
+          _id: new ObjectId(req.params.id),
+        });
+        if (!result) return res.status(404).json({ error: "Order not found" });
+        res.send(result);
+      } catch (err) {
+        res.status(500).json({ error: err.message });
+      }
+    });
+
+    // PATCH cancel order — only if orderStatus is "processing"
+    app.patch("/api/orders/:id/cancel", async (req, res) => {
+      try {
+        const order = await ordersCollection.findOne({
+          _id: new ObjectId(req.params.id),
+        });
+
+        if (!order) return res.status(404).json({ error: "Order not found" });
+
+        if (order.orderStatus !== "processing") {
+          return res.status(400).json({
+            error: `Cannot cancel an order with status: ${order.orderStatus}`,
+          });
+        }
+
+        // Cancel order + restore product to available
+        await ordersCollection.updateOne(
+          { _id: new ObjectId(req.params.id) },
+          { $set: { orderStatus: "cancelled", updatedAt: new Date() } },
+        );
+
+        await sellerCollection.updateOne(
+          { _id: new ObjectId(order.productId) },
+          { $set: { status: "available" } },
+        );
+
+        res.json({ success: true });
+      } catch (err) {
+        res.status(500).json({ error: err.message });
       }
     });
 
