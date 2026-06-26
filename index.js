@@ -480,6 +480,29 @@ async function run() {
       }
     });
 
+    // GET buyer dashboard summary
+    app.get("/api/buyer/summary/:email", async (req, res) => {
+      try {
+        const email = req.params.email;
+
+        const [orders, wishlist] = await Promise.all([
+          ordersCollection
+            .find({ "buyerInfo.email": email })
+            .sort({ createdAt: -1 })
+            .toArray(),
+          wishlistCollection.find({ userEmail: email }).toArray(),
+        ]);
+
+        const totalOrders = orders.length;
+        const wishlistCount = wishlist.length;
+        const recentPurchases = orders.slice(0, 5); // latest 5
+
+        res.json({ totalOrders, wishlistCount, recentPurchases });
+      } catch (err) {
+        res.status(500).json({ error: err.message });
+      }
+    });
+
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
     console.log(
