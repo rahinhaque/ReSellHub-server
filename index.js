@@ -1,4 +1,4 @@
-const { ObjectId } = require("mongodb"); // add this import at the top of server.js
+const { ObjectId } = require("mongodb");
 const express = require("express");
 const app = express();
 const dotenv = require("dotenv");
@@ -11,11 +11,9 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 app.use(cors());
 app.use(express.json());
 
-//MongoDB=========================================================================================
 const { MongoClient, ServerApiVersion } = require("mongodb");
 const uri = process.env.MONGODB_URI;
 
-// Create a MongoClient with a MongoClientOptions object to set the Stable API version
 const client = new MongoClient(uri, {
   serverApi: {
     version: ServerApiVersion.v1,
@@ -26,65 +24,58 @@ const client = new MongoClient(uri, {
 
 async function run() {
   try {
-    // Connect the client to the server	(optional starting in v4.7)
     await client.connect();
 
-    //db
     const db = client.db("reselll_hub_db");
 
-    //collections
     const sellerCollection = db.collection("sellerProducts");
     const wishlistCollection = db.collection("wishlist");
     const ordersCollection = db.collection("orders");
     const paymentsCollection = db.collection("payments");
 
-    // GET all products (for public browse page)
+    // ─── Products ────────────────────────────────────────────────────────────
+
     app.get("/api/products", async (req, res) => {
       const { category, condition, search, sort } = req.query;
-
       const query = { status: "available" };
-
       if (category) query.category = category;
       if (condition) query.condition = condition;
       if (search) query.title = { $regex: search, $options: "i" };
-
-      let sortOption = { createdAt: -1 }; // newest first by default
+      let sortOption = { createdAt: -1 };
       if (sort === "price_asc") sortOption = { price: 1 };
       if (sort === "price_desc") sortOption = { price: -1 };
-
       const result = await sellerCollection
         .find(query)
         .sort(sortOption)
         .toArray();
       res.send(result);
     });
-    // GET single product by id (public)
+
     app.get("/api/products/:id", async (req, res) => {
-      const id = req.params.id;
-      const result = await sellerCollection.findOne({ _id: new ObjectId(id) });
+      const result = await sellerCollection.findOne({
+        _id: new ObjectId(req.params.id),
+      });
       if (!result) return res.status(404).json({ error: "Product not found" });
       res.send(result);
     });
 
-    //Seller products api
+    // ─── Seller Products ─────────────────────────────────────────────────────
 
-    //Get All products added by seller:
     app.get("/api/sellerProducts/:email", async (req, res) => {
-      const email = req.params.email;
-      const query = { "sellerInfo.email": email }; // ← nested field query
-      const result = await sellerCollection.find(query).toArray();
+      const result = await sellerCollection
+        .find({ "sellerInfo.email": req.params.email })
+        .toArray();
       res.send(result);
     });
 
-    // GET single product by id
     app.get("/api/sellerProducts/product/:id", async (req, res) => {
-      const id = req.params.id;
-      const result = await sellerCollection.findOne({ _id: new ObjectId(id) });
+      const result = await sellerCollection.findOne({
+        _id: new ObjectId(req.params.id),
+      });
       if (!result) return res.status(404).json({ error: "Product not found" });
       res.send(result);
     });
 
-    //added product for seller
     app.post("/api/addedProduct", async (req, res) => {
       const {
         title,
@@ -96,27 +87,22 @@ async function run() {
         images,
         sellerInfo,
       } = req.body;
-
-      const addData = {
+      const result = await sellerCollection.insertOne({
         title,
         description,
         category,
         condition,
         price: Number(price),
         quantity: Number(quantity),
-        images, // array of image URLs
-        sellerInfo, // { userId, name, email, phone }
+        images,
+        sellerInfo,
         status: "available",
         createdAt: new Date(),
-      };
-
-      const result = await sellerCollection.insertOne(addData);
+      });
       res.send(result);
     });
 
-    // UPDATE a product by _id
     app.put("/api/sellerProducts/:id", async (req, res) => {
-      const id = req.params.id;
       const {
         title,
         category,
@@ -127,39 +113,34 @@ async function run() {
         images,
         status,
       } = req.body;
-
-      const updatedFields = {
-        $set: {
-          title,
-          category,
-          condition,
-          price: Number(price),
-          quantity: Number(quantity),
-          description,
-          images,
-          status,
-          updatedAt: new Date(),
-        },
-      };
-
       const result = await sellerCollection.updateOne(
-        { _id: new ObjectId(id) },
-        updatedFields,
+        { _id: new ObjectId(req.params.id) },
+        {
+          $set: {
+            title,
+            category,
+            condition,
+            price: Number(price),
+            quantity: Number(quantity),
+            description,
+            images,
+            status,
+            updatedAt: new Date(),
+          },
+        },
       );
       res.send(result);
     });
 
-    // DELETE a product by _id
     app.delete("/api/sellerProducts/:id", async (req, res) => {
-      const id = req.params.id;
       const result = await sellerCollection.deleteOne({
-        _id: new ObjectId(id),
+        _id: new ObjectId(req.params.id),
       });
       res.send(result);
     });
 
-    //buyer dashbaord api-----------------------
-    // Add to wishlist
+    // ─── Wishlist ─────────────────────────────────────────────────────────────
+
     app.post("/api/wishlist", async (req, res) => {
       try {
         const {
@@ -171,13 +152,11 @@ async function run() {
           image,
           sellerInfo,
         } = req.body;
-
         if (!productId || (!userId && !userEmail)) {
-          return res.status(400).json({
-            error: "productId and userId or userEmail are required",
-          });
+          return res
+            .status(400)
+            .json({ error: "productId and userId or userEmail are required" });
         }
-
         const existing = await wishlistCollection.findOne({
           productId,
           $or: [
@@ -185,12 +164,9 @@ async function run() {
             userEmail ? { userEmail } : null,
           ].filter(Boolean),
         });
-
-        if (existing) {
+        if (existing)
           return res.status(409).json({ error: "Already in wishlist" });
-        }
-
-        const item = {
+        const result = await wishlistCollection.insertOne({
           productId,
           userId: userId || "",
           userEmail: userEmail || "",
@@ -199,51 +175,6 @@ async function run() {
           image: image || "",
           sellerInfo: sellerInfo || null,
           createdAt: new Date(),
-        };
-
-        const result = await wishlistCollection.insertOne(item);
-        res.send(result);
-      } catch (error) {
-        res.status(500).json({ error: error.message });
-      }
-    });
-
-    // Get wishlist by email
-    app.get("/api/wishlist/:email", async (req, res) => {
-      try {
-        const email = req.params.email;
-        const result = await wishlistCollection
-          .find({ userEmail: email })
-          .sort({ createdAt: -1 })
-          .toArray();
-
-        res.send(result);
-      } catch (error) {
-        res.status(500).json({ error: error.message });
-      }
-    });
-
-    // Get wishlist by userId
-    app.get("/api/wishlist/user/:userId", async (req, res) => {
-      try {
-        const userId = req.params.userId;
-        const result = await wishlistCollection
-          .find({ userId })
-          .sort({ createdAt: -1 })
-          .toArray();
-
-        res.send(result);
-      } catch (error) {
-        res.status(500).json({ error: error.message });
-      }
-    });
-
-    // Remove wishlist item
-    app.delete("/api/wishlist/:id", async (req, res) => {
-      try {
-        const id = req.params.id;
-        const result = await wishlistCollection.deleteOne({
-          _id: new ObjectId(id),
         });
         res.send(result);
       } catch (error) {
@@ -251,8 +182,43 @@ async function run() {
       }
     });
 
-    //stripe
-    // POST /api/create-checkout-session
+    app.get("/api/wishlist/user/:userId", async (req, res) => {
+      try {
+        const result = await wishlistCollection
+          .find({ userId: req.params.userId })
+          .sort({ createdAt: -1 })
+          .toArray();
+        res.send(result);
+      } catch (error) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+
+    app.get("/api/wishlist/:email", async (req, res) => {
+      try {
+        const result = await wishlistCollection
+          .find({ userEmail: req.params.email })
+          .sort({ createdAt: -1 })
+          .toArray();
+        res.send(result);
+      } catch (error) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+
+    app.delete("/api/wishlist/:id", async (req, res) => {
+      try {
+        const result = await wishlistCollection.deleteOne({
+          _id: new ObjectId(req.params.id),
+        });
+        res.send(result);
+      } catch (error) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+
+    // ─── Stripe ───────────────────────────────────────────────────────────────
+
     app.post("/api/create-checkout-session", async (req, res) => {
       const {
         productId,
@@ -266,7 +232,6 @@ async function run() {
         sellerName,
         sellerEmail,
       } = req.body;
-
       try {
         const session = await stripe.checkout.sessions.create({
           payment_method_types: ["card"],
@@ -299,7 +264,6 @@ async function run() {
           success_url: `${process.env.CLIENT_URL}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
           cancel_url: `${process.env.CLIENT_URL}/products/${productId}`,
         });
-
         res.json({ url: session.url, sessionId: session.id });
       } catch (err) {
         console.error("Stripe error:", err);
@@ -307,19 +271,13 @@ async function run() {
       }
     });
 
-    // POST /api/orders/confirm
     app.post("/api/orders/confirm", async (req, res) => {
       const { sessionId } = req.body;
-
       try {
-        // 1. Verify payment with Stripe
         const session = await stripe.checkout.sessions.retrieve(sessionId);
-
         if (session.payment_status !== "paid") {
           return res.status(400).json({ error: "Payment not completed" });
         }
-
-        // 2. Idempotency guard — prevent duplicate orders on refresh
         const existing = await ordersCollection.findOne({
           stripeSessionId: sessionId,
         });
@@ -330,10 +288,7 @@ async function run() {
             alreadyExists: true,
           });
         }
-
         const meta = session.metadata;
-
-        // 3. Save order
         const order = {
           buyerInfo: {
             userId: meta.buyerId,
@@ -349,32 +304,24 @@ async function run() {
           productTitle: meta.productTitle,
           price: parseFloat(meta.price),
           paymentStatus: "paid",
-          orderStatus: "processing",
+          orderStatus: "pending", // ← FIXED: was "processing"
           stripeSessionId: sessionId,
           createdAt: new Date(),
         };
-
         const orderResult = await ordersCollection.insertOne(order);
         const orderId = orderResult.insertedId.toString();
-
-        // 4. Save payment
-        const payment = {
+        await paymentsCollection.insertOne({
           orderId,
           transactionId: session.payment_intent,
           amount: session.amount_total / 100,
           paymentStatus: "success",
           stripeSessionId: sessionId,
           createdAt: new Date(),
-        };
-
-        await paymentsCollection.insertOne(payment);
-
-        // 5. Mark product as sold
+        });
         await sellerCollection.updateOne(
           { _id: new ObjectId(meta.productId) },
           { $set: { status: "sold" } },
         );
-
         res.json({ success: true, orderId });
       } catch (err) {
         console.error("Order confirm error:", err);
@@ -382,12 +329,13 @@ async function run() {
       }
     });
 
-    // GET orders by buyer email
+    // ─── Orders ───────────────────────────────────────────────────────────────
+    // IMPORTANT: specific routes must come before /api/orders/:id
+
     app.get("/api/orders/buyer/:email", async (req, res) => {
       try {
-        const email = req.params.email;
         const result = await ordersCollection
-          .find({ "buyerInfo.email": email })
+          .find({ "buyerInfo.email": req.params.email })
           .sort({ createdAt: -1 })
           .toArray();
         res.send(result);
@@ -396,7 +344,19 @@ async function run() {
       }
     });
 
-    // GET single order by id
+    app.get("/api/orders/seller/:email", async (req, res) => {
+      try {
+        const result = await ordersCollection
+          .find({ "sellerInfo.email": req.params.email })
+          .sort({ createdAt: -1 })
+          .toArray();
+        res.send(result);
+      } catch (err) {
+        res.status(500).json({ error: err.message });
+      }
+    });
+
+    // GET single order — AFTER the specific routes above
     app.get("/api/orders/:id", async (req, res) => {
       try {
         const result = await ordersCollection.findOne({
@@ -409,60 +369,91 @@ async function run() {
       }
     });
 
-    // PATCH cancel order — only if orderStatus is "processing"
+    // PATCH cancel order — buyer cancels while still "pending"
     app.patch("/api/orders/:id/cancel", async (req, res) => {
       try {
         const order = await ordersCollection.findOne({
           _id: new ObjectId(req.params.id),
         });
-
         if (!order) return res.status(404).json({ error: "Order not found" });
-
-        if (order.orderStatus !== "processing") {
-          return res.status(400).json({
-            error: `Cannot cancel an order with status: ${order.orderStatus}`,
-          });
+        if (order.orderStatus !== "pending") {
+          return res
+            .status(400)
+            .json({
+              error: `Cannot cancel an order with status: ${order.orderStatus}`,
+            });
         }
-
-        // Cancel order + restore product to available
         await ordersCollection.updateOne(
           { _id: new ObjectId(req.params.id) },
           { $set: { orderStatus: "cancelled", updatedAt: new Date() } },
         );
-
         await sellerCollection.updateOne(
           { _id: new ObjectId(order.productId) },
           { $set: { status: "available" } },
         );
-
         res.json({ success: true });
       } catch (err) {
         res.status(500).json({ error: err.message });
       }
     });
 
-    // GET payments by buyer email (joins with orders to filter by buyer)
+    // PATCH seller updates order status
+    app.patch("/api/orders/:id/status", async (req, res) => {
+      try {
+        const { status } = req.body;
+        const ALLOWED = [
+          "pending",
+          "accepted",
+          "cancelled",
+          "shipped",
+          "delivered",
+        ];
+        if (!ALLOWED.includes(status)) {
+          return res.status(400).json({ error: `Invalid status: ${status}` });
+        }
+        const order = await ordersCollection.findOne({
+          _id: new ObjectId(req.params.id),
+        });
+        if (!order) return res.status(404).json({ error: "Order not found" });
+
+        const TRANSITIONS = {
+          pending: ["accepted", "cancelled"],
+          accepted: ["shipped"],
+          shipped: ["delivered"],
+          delivered: [],
+          cancelled: [],
+        };
+
+        const current = order.orderStatus;
+        if (!TRANSITIONS[current]?.includes(status)) {
+          return res
+            .status(400)
+            .json({ error: `Cannot move from "${current}" to "${status}"` });
+        }
+
+        await ordersCollection.updateOne(
+          { _id: new ObjectId(req.params.id) },
+          { $set: { orderStatus: status, updatedAt: new Date() } },
+        );
+        res.json({ success: true, orderStatus: status });
+      } catch (err) {
+        res.status(500).json({ error: err.message });
+      }
+    });
+
+    // ─── Payments ─────────────────────────────────────────────────────────────
+
     app.get("/api/payments/buyer/:email", async (req, res) => {
       try {
-        const email = req.params.email;
-
-        // 1. Get all orders for this buyer
         const buyerOrders = await ordersCollection
-          .find({ "buyerInfo.email": email })
+          .find({ "buyerInfo.email": req.params.email })
           .toArray();
-
         if (buyerOrders.length === 0) return res.json([]);
-
-        // 2. Get orderIds as strings
         const orderIds = buyerOrders.map((o) => o._id.toString());
-
-        // 3. Get all payments matching those orderIds
         const payments = await paymentsCollection
           .find({ orderId: { $in: orderIds } })
           .sort({ createdAt: -1 })
           .toArray();
-
-        // 4. Attach productTitle and buyerInfo from the matching order
         const enriched = payments.map((payment) => {
           const order = buyerOrders.find(
             (o) => o._id.toString() === payment.orderId,
@@ -473,52 +464,43 @@ async function run() {
             orderStatus: order?.orderStatus || "—",
           };
         });
-
         res.json(enriched);
       } catch (err) {
         res.status(500).json({ error: err.message });
       }
     });
 
-    // GET buyer dashboard summary
+    // ─── Buyer Summary ────────────────────────────────────────────────────────
+
     app.get("/api/buyer/summary/:email", async (req, res) => {
       try {
-        const email = req.params.email;
-
         const [orders, wishlist] = await Promise.all([
           ordersCollection
-            .find({ "buyerInfo.email": email })
+            .find({ "buyerInfo.email": req.params.email })
             .sort({ createdAt: -1 })
             .toArray(),
-          wishlistCollection.find({ userEmail: email }).toArray(),
+          wishlistCollection.find({ userEmail: req.params.email }).toArray(),
         ]);
-
-        const totalOrders = orders.length;
-        const wishlistCount = wishlist.length;
-        const recentPurchases = orders.slice(0, 5); // latest 5
-
-        res.json({ totalOrders, wishlistCount, recentPurchases });
+        res.json({
+          totalOrders: orders.length,
+          wishlistCount: wishlist.length,
+          recentPurchases: orders.slice(0, 5),
+        });
       } catch (err) {
         res.status(500).json({ error: err.message });
       }
     });
 
-    // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
     console.log(
       "Pinged your deployment. You successfully connected to MongoDB!",
     );
   } finally {
-    // Ensures that the client will close when you finish/error
-    //  await client.close();
+    // await client.close();
   }
 }
 run().catch(console.dir);
 
-app.get("/", (req, res) => {
-  res.send("Hello World!");
-});
+app.get("/", (req, res) => res.send("Hello World!"));
 
-app.listen(port, () => {
-  console.log(`Example app listening on port ${port}`);
-});
+app.listen(port, () => console.log(`Example app listening on port ${port}`));
