@@ -405,11 +405,9 @@ async function run() {
         });
         if (!order) return res.status(404).json({ error: "Order not found" });
         if (order.orderStatus !== "pending") {
-          return res
-            .status(400)
-            .json({
-              error: `Cannot cancel an order with status: ${order.orderStatus}`,
-            });
+          return res.status(400).json({
+            error: `Cannot cancel an order with status: ${order.orderStatus}`,
+          });
         }
 
         await ordersCollection.updateOne(
@@ -657,6 +655,24 @@ async function run() {
           topProducts,
           statusBreakdown,
         });
+      } catch (err) {
+        res.status(500).json({ error: err.message });
+      }
+    });
+
+    // ─── Admin Overview ───────────────────────────────────────────────────────────
+    app.get("/api/admin/overview", async (req, res) => {
+      try {
+        const db = client.db("reselll_hub_db");
+        const usersCollection = db.collection("user"); // ← better-auth saves users here
+
+        const [totalUsers, totalProducts, totalOrders] = await Promise.all([
+          usersCollection.countDocuments(),
+          sellerCollection.countDocuments(),
+          ordersCollection.countDocuments(),
+        ]);
+
+        res.json({ totalUsers, totalProducts, totalOrders });
       } catch (err) {
         res.status(500).json({ error: err.message });
       }
