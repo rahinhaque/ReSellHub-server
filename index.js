@@ -441,6 +441,45 @@ async function run() {
       }
     });
 
+    // GET payments by buyer email (joins with orders to filter by buyer)
+    app.get("/api/payments/buyer/:email", async (req, res) => {
+      try {
+        const email = req.params.email;
+
+        // 1. Get all orders for this buyer
+        const buyerOrders = await ordersCollection
+          .find({ "buyerInfo.email": email })
+          .toArray();
+
+        if (buyerOrders.length === 0) return res.json([]);
+
+        // 2. Get orderIds as strings
+        const orderIds = buyerOrders.map((o) => o._id.toString());
+
+        // 3. Get all payments matching those orderIds
+        const payments = await paymentsCollection
+          .find({ orderId: { $in: orderIds } })
+          .sort({ createdAt: -1 })
+          .toArray();
+
+        // 4. Attach productTitle and buyerInfo from the matching order
+        const enriched = payments.map((payment) => {
+          const order = buyerOrders.find(
+            (o) => o._id.toString() === payment.orderId,
+          );
+          return {
+            ...payment,
+            productTitle: order?.productTitle || "Unknown product",
+            orderStatus: order?.orderStatus || "—",
+          };
+        });
+
+        res.json(enriched);
+      } catch (err) {
+        res.status(500).json({ error: err.message });
+      }
+    });
+
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
     console.log(
