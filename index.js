@@ -99,9 +99,14 @@ async function run() {
 
     // ─── Products ─────────────────────────────────────────────────────────────
 
+    // Replace the existing /api/products route
+    // Replace the existing /api/products route
     app.get("/api/products", async (req, res) => {
       const { category, condition, search, sort } = req.query;
-      const query = { status: "available" };
+      const query = {
+        status: "available",
+        moderationStatus: "approved", // ← only approved products are public
+      };
       if (category) query.category = category;
       if (condition) query.condition = condition;
       if (search) query.title = { $regex: search, $options: "i" };
@@ -154,9 +159,8 @@ async function run() {
         } = req.body;
 
         const check = await requireActiveUserByEmail(sellerInfo?.email);
-        if (!check.ok) {
+        if (!check.ok)
           return res.status(check.status).json({ error: check.error });
-        }
 
         const result = await sellerCollection.insertOne({
           title,
@@ -167,7 +171,9 @@ async function run() {
           quantity: Number(quantity),
           images,
           sellerInfo,
-          status: "available",
+          status: "pending", // ← not visible publicly until approved
+          moderationStatus: "pending", // ← admin must approve
+          isReported: false,
           createdAt: new Date(),
         });
         res.send(result);
@@ -755,6 +761,145 @@ async function run() {
         // Clean up any lingering sessions for a deleted user too.
         await sessionsCollection.deleteMany({ userId: req.params.id });
         res.json(result);
+      } catch (err) {
+        res.status(500).json({ error: err.message });
+      }
+    });
+
+    // ─── Admin Product Moderation ─────────────────────────────────────────────
+
+    // GET all products for admin (all statuses, all moderation states)
+    app.get("/api/admin/products", async (req, res) => {
+      try {
+        const { moderation, search } = req.query;
+        const query = {};
+        if (moderation) query.moderationStatus = moderation;
+        if (search) query.title = { $regex: search, $options: "i" };
+        const result = await sellerCollection
+          .find(query)
+          .sort({ createdAt: -1 })
+          .toArray();
+        res.json(result);
+      } catch (err) {
+        res.status(500).json({ error: err.message });
+      }
+    });
+
+    // PATCH — approve or reject a product
+    app.patch("/api/admin/products/:id/moderate", async (req, res) => {
+      try {
+        const { moderationStatus } = req.body; // "approved" | "rejected"
+        const ALLOWED = ["approved", "rejected", "pending"];
+        if (!ALLOWED.includes(moderationStatus)) {
+          return res.status(400).json({ error: "Invalid moderationStatus" });
+        }
+
+        // If approved → set status available; if rejected → set status unavailable
+        const statusMap = {
+          approved: "available",
+          rejected: "rejected",
+          pending: "pending",
+        };
+
+        await sellerCollection.updateOne(
+          { _id: new ObjectId(req.params.id) },
+          {
+            $set: {
+              moderationStatus,
+              status: statusMap[moderationStatus],
+              moderatedAt: new Date(),
+            },
+          },
+        );
+        res.json({ success: true, moderationStatus });
+      } catch (err) {
+        res.status(500).json({ error: err.message });
+      }
+    });
+
+    // DELETE — admin hard deletes a product
+    app.delete("/api/admin/products/:id", async (req, res) => {
+      try {
+        const result = await sellerCollection.deleteOne({
+          _id: new ObjectId(req.params.id),
+        });
+        res.json(result);
+      } catch (err) {
+        res.status(500).json({ error: err.message });
+      }
+    });
+
+    // ─── Reports ──────────────────────────────────────────────────────────────
+
+    // POST — buyer reports a product
+    app.post("/api/reports", async (req, res) => {
+      try {
+        const reportsCollection = db.collection("reports");
+        const { productId, productTitle, reporterEmail, reason, details } =
+          req.body;
+        if (!productId || !reporterEmail || !reason) {
+          return res.status(400).json({
+            error: "productId, reporterEmail and reason are required",
+          });
+        }
+
+        // Prevent duplicate reports from same user
+        const existing = await reportsCollection.findOne({
+          productId,
+          reporterEmail,
+        });
+        if (existing) {
+          return res
+            .status(409)
+            .json({ error: "You have already reported this product" });
+        }
+
+        const result = await reportsCollection.insertOne({
+          productId,
+          productTitle: productTitle || "",
+          reporterEmail,
+          reason,
+          details: details || "",
+          status: "open", // open | reviewed | dismissed
+          createdAt: new Date(),
+        });
+
+        // Flag the product as reported
+        await sellerCollection.updateOne(
+          { _id: new ObjectId(productId) },
+          { $set: { isReported: true } },
+        );
+
+        res.json({ success: true, insertedId: result.insertedId });
+      } catch (err) {
+        res.status(500).json({ error: err.message });
+      }
+    });
+
+    // GET all reports (admin)
+    app.get("/api/reports", async (req, res) => {
+      try {
+        const reportsCollection = db.collection("reports");
+        const result = await reportsCollection
+          .find({})
+          .sort({ createdAt: -1 })
+          .toArray();
+        res.json(result);
+      } catch (err) {
+        res.status(500).json({ error: err.message });
+      }
+    });
+
+    // PATCH — admin updates report status
+    app.patch("/api/reports/:id", async (req, res) => {
+      try {
+        const reportsCollection = db.collection("reports");
+        const { status } = req.body; // "reviewed" | "dismissed"
+        await reportsCollection.updateOne(
+          { _id: new ObjectId(req.params.id) },
+          { $set: { status, reviewedAt: new Date() } },
+        );
+        res.json({ success: true });
       } catch (err) {
         res.status(500).json({ error: err.message });
       }
