@@ -377,11 +377,9 @@ async function run() {
         });
         if (!order) return res.status(404).json({ error: "Order not found" });
         if (order.orderStatus !== "pending") {
-          return res
-            .status(400)
-            .json({
-              error: `Cannot cancel an order with status: ${order.orderStatus}`,
-            });
+          return res.status(400).json({
+            error: `Cannot cancel an order with status: ${order.orderStatus}`,
+          });
         }
         await ordersCollection.updateOne(
           { _id: new ObjectId(req.params.id) },
@@ -485,6 +483,82 @@ async function run() {
           totalOrders: orders.length,
           wishlistCount: wishlist.length,
           recentPurchases: orders.slice(0, 5),
+        });
+      } catch (err) {
+        res.status(500).json({ error: err.message });
+      }
+    });
+
+    // GET seller analytics
+    app.get("/api/seller/analytics/:email", async (req, res) => {
+      try {
+        const email = req.params.email;
+
+        // All delivered/shipped orders for this seller
+        const orders = await ordersCollection
+          .find({
+            "sellerInfo.email": email,
+            orderStatus: { $in: ["delivered", "shipped", "accepted"] },
+          })
+          .toArray();
+
+        // Total revenue & total orders
+        const totalRevenue = orders.reduce((sum, o) => sum + (o.price || 0), 0);
+        const totalOrders = orders.length;
+
+        // Monthly sales trend (last 6 months)
+        const now = new Date();
+        const monthly = [];
+        for (let i = 5; i >= 0; i--) {
+          const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+          const label = d.toLocaleString("en-US", {
+            month: "short",
+            year: "2-digit",
+          });
+          const monthOrders = orders.filter((o) => {
+            const od = new Date(o.createdAt);
+            return (
+              od.getMonth() === d.getMonth() &&
+              od.getFullYear() === d.getFullYear()
+            );
+          });
+          monthly.push({
+            month: label,
+            revenue: monthOrders.reduce((sum, o) => sum + (o.price || 0), 0),
+            orders: monthOrders.length,
+          });
+        }
+
+        // Top selling products (by number of orders)
+        const productMap = {};
+        orders.forEach((o) => {
+          const key = o.productTitle || "Unknown";
+          if (!productMap[key])
+            productMap[key] = { title: key, orders: 0, revenue: 0 };
+          productMap[key].orders += 1;
+          productMap[key].revenue += o.price || 0;
+        });
+        const topProducts = Object.values(productMap)
+          .sort((a, b) => b.orders - a.orders)
+          .slice(0, 5);
+
+        // Order status breakdown
+        const allOrders = await ordersCollection
+          .find({ "sellerInfo.email": email })
+          .toArray();
+
+        const statusBreakdown = allOrders.reduce((acc, o) => {
+          const s = o.orderStatus || "pending";
+          acc[s] = (acc[s] || 0) + 1;
+          return acc;
+        }, {});
+
+        res.json({
+          totalRevenue,
+          totalOrders,
+          monthly,
+          topProducts,
+          statusBreakdown,
         });
       } catch (err) {
         res.status(500).json({ error: err.message });
