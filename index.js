@@ -26,8 +26,10 @@ const client = new MongoClient(uri, {
 async function issueRefund(orderId, paymentsCollection, ordersCollection) {
   const payment = await paymentsCollection.findOne({ orderId });
   if (!payment) return { skipped: true, reason: "no payment found" };
-  if (payment.paymentStatus === "refunded") return { skipped: true, reason: "already refunded" };
-  if (!payment.transactionId) return { skipped: true, reason: "no transactionId" };
+  if (payment.paymentStatus === "refunded")
+    return { skipped: true, reason: "already refunded" };
+  if (!payment.transactionId)
+    return { skipped: true, reason: "no transactionId" };
 
   const refund = await stripe.refunds.create({
     payment_intent: payment.transactionId,
@@ -41,12 +43,12 @@ async function issueRefund(orderId, paymentsCollection, ordersCollection) {
         refundId: refund.id,
         refundedAt: new Date(),
       },
-    }
+    },
   );
 
   await ordersCollection.updateOne(
     { orderId },
-    { $set: { paymentStatus: "refunded" } }
+    { $set: { paymentStatus: "refunded" } },
   );
 
   return { success: true, refundId: refund.id };
@@ -58,12 +60,44 @@ async function run() {
 
     const db = client.db("reselll_hub_db");
 
+    // ── Collections ───────────────────────────────────────────────────────────
     const sellerCollection = db.collection("sellerProducts");
     const wishlistCollection = db.collection("wishlist");
     const ordersCollection = db.collection("orders");
     const paymentsCollection = db.collection("payments");
+    const usersCollection = db.collection("user");
+    const sessionsCollection = db.collection("session"); // better-auth sessions
 
-    // ─── Products ────────────────────────────────────────────────────────────
+    // ── Active-user middleware ──────────────────────────────────────────────
+    // The Next.js frontend has its own session-cookie auth (better-auth),
+    // but this Express API has no awareness of who's calling it beyond
+    // whatever the client sends in the body. At minimum, every mutation
+    // route that's keyed off an email/userId should confirm that user
+    // isn't blocked before doing anything. This checks status by email
+    // since that's what most routes already receive from the client.
+    //
+    // NOTE: this is a stop-gap, not real authentication. The Express API
+    // currently trusts whatever buyerEmail/sellerEmail the client sends —
+    // there's no token/session verification here at all. That's a separate,
+    // larger problem (anyone can call these endpoints with any email) and
+    // should be addressed by validating the better-auth session token on
+    // every request, ideally by sharing a verification call back to the
+    // Next.js app or by switching to a single backend.
+    async function requireActiveUserByEmail(email) {
+      if (!email) return { ok: false, status: 400, error: "Email required" };
+      const user = await usersCollection.findOne({ email });
+      if (!user) return { ok: false, status: 404, error: "User not found" };
+      if (user.status === "blocked") {
+        return {
+          ok: false,
+          status: 403,
+          error: "Your account has been blocked. Please contact support.",
+        };
+      }
+      return { ok: true, user };
+    }
+
+    // ─── Products ─────────────────────────────────────────────────────────────
 
     app.get("/api/products", async (req, res) => {
       const { category, condition, search, sort } = req.query;
@@ -89,7 +123,7 @@ async function run() {
       res.send(result);
     });
 
-    // ─── Seller Products ─────────────────────────────────────────────────────
+    // ─── Seller Products ──────────────────────────────────────────────────────
 
     app.get("/api/sellerProducts/:email", async (req, res) => {
       const result = await sellerCollection
@@ -107,29 +141,39 @@ async function run() {
     });
 
     app.post("/api/addedProduct", async (req, res) => {
-      const {
-        title,
-        description,
-        category,
-        condition,
-        price,
-        quantity,
-        images,
-        sellerInfo,
-      } = req.body;
-      const result = await sellerCollection.insertOne({
-        title,
-        description,
-        category,
-        condition,
-        price: Number(price),
-        quantity: Number(quantity),
-        images,
-        sellerInfo,
-        status: "available",
-        createdAt: new Date(),
-      });
-      res.send(result);
+      try {
+        const {
+          title,
+          description,
+          category,
+          condition,
+          price,
+          quantity,
+          images,
+          sellerInfo,
+        } = req.body;
+
+        const check = await requireActiveUserByEmail(sellerInfo?.email);
+        if (!check.ok) {
+          return res.status(check.status).json({ error: check.error });
+        }
+
+        const result = await sellerCollection.insertOne({
+          title,
+          description,
+          category,
+          condition,
+          price: Number(price),
+          quantity: Number(quantity),
+          images,
+          sellerInfo,
+          status: "available",
+          createdAt: new Date(),
+        });
+        res.send(result);
+      } catch (error) {
+        res.status(500).json({ error: error.message });
+      }
     });
 
     app.put("/api/sellerProducts/:id", async (req, res) => {
@@ -187,6 +231,14 @@ async function run() {
             .status(400)
             .json({ error: "productId and userId or userEmail are required" });
         }
+
+        if (userEmail) {
+          const check = await requireActiveUserByEmail(userEmail);
+          if (!check.ok) {
+            return res.status(check.status).json({ error: check.error });
+          }
+        }
+
         const existing = await wishlistCollection.findOne({
           productId,
           $or: [
@@ -247,7 +299,7 @@ async function run() {
       }
     });
 
-    // ─── Stripe checkout ──────────────────────────────────────────────────────
+    // ─── Stripe Checkout ──────────────────────────────────────────────────────
 
     app.post("/api/create-checkout-session", async (req, res) => {
       const {
@@ -263,6 +315,13 @@ async function run() {
         sellerEmail,
       } = req.body;
       try {
+        // Block check: a blocked user should not be able to spin up a new
+        // Stripe checkout session even if they still hold a valid cookie.
+        const check = await requireActiveUserByEmail(buyerEmail);
+        if (!check.ok) {
+          return res.status(check.status).json({ error: check.error });
+        }
+
         const session = await stripe.checkout.sessions.create({
           payment_method_types: ["card"],
           mode: "payment",
@@ -344,7 +403,7 @@ async function run() {
           orderId,
           transactionId: session.payment_intent,
           amount: session.amount_total / 100,
-          paymentStatus: "paid", // ← "paid" not "success"
+          paymentStatus: "paid",
           stripeSessionId: sessionId,
           createdAt: new Date(),
         });
@@ -359,7 +418,7 @@ async function run() {
       }
     });
 
-    // ─── Orders — specific routes BEFORE /:id ────────────────────────────────
+    // ─── Orders ───────────────────────────────────────────────────────────────
 
     app.get("/api/orders/buyer/:email", async (req, res) => {
       try {
@@ -397,7 +456,6 @@ async function run() {
       }
     });
 
-    // PATCH — buyer cancels (only when pending) → auto refund
     app.patch("/api/orders/:id/cancel", async (req, res) => {
       try {
         const order = await ordersCollection.findOne({
@@ -409,7 +467,6 @@ async function run() {
             error: `Cannot cancel an order with status: ${order.orderStatus}`,
           });
         }
-
         await ordersCollection.updateOne(
           { _id: new ObjectId(req.params.id) },
           {
@@ -420,8 +477,6 @@ async function run() {
             },
           },
         );
-
-        // Auto refund
         let refundResult = null;
         try {
           refundResult = await issueRefund(
@@ -435,20 +490,16 @@ async function run() {
             refundErr.message,
           );
         }
-
-        // Restore product
         await sellerCollection.updateOne(
           { _id: new ObjectId(order.productId) },
           { $set: { status: "available" } },
         );
-
         res.json({ success: true, refund: refundResult });
       } catch (err) {
         res.status(500).json({ error: err.message });
       }
     });
 
-    // PATCH — seller updates order status → auto refund on cancel/reject
     app.patch("/api/orders/:id/status", async (req, res) => {
       try {
         const { status } = req.body;
@@ -462,12 +513,10 @@ async function run() {
         if (!ALLOWED.includes(status)) {
           return res.status(400).json({ error: `Invalid status: ${status}` });
         }
-
         const order = await ordersCollection.findOne({
           _id: new ObjectId(req.params.id),
         });
         if (!order) return res.status(404).json({ error: "Order not found" });
-
         const TRANSITIONS = {
           pending: ["accepted", "cancelled"],
           accepted: ["shipped"],
@@ -475,23 +524,17 @@ async function run() {
           delivered: [],
           cancelled: [],
         };
-
         if (!TRANSITIONS[order.orderStatus]?.includes(status)) {
           return res.status(400).json({
             error: `Cannot move from "${order.orderStatus}" to "${status}"`,
           });
         }
-
-        // Build the update fields
         const updateFields = { orderStatus: status, updatedAt: new Date() };
         if (status === "cancelled") updateFields.paymentStatus = "refunded";
-
         await ordersCollection.updateOne(
           { _id: new ObjectId(req.params.id) },
           { $set: updateFields },
         );
-
-        // If seller rejects → auto refund + restore product
         let refundResult = null;
         if (status === "cancelled") {
           try {
@@ -506,13 +549,11 @@ async function run() {
               refundErr.message,
             );
           }
-
           await sellerCollection.updateOne(
             { _id: new ObjectId(order.productId) },
             { $set: { status: "available" } },
           );
         }
-
         res.json({ success: true, orderStatus: status, refund: refundResult });
       } catch (err) {
         res.status(500).json({ error: err.message });
@@ -521,45 +562,33 @@ async function run() {
 
     // ─── Payments ─────────────────────────────────────────────────────────────
 
-    // Replace your existing /api/payments/buyer/:email endpoint
-
     app.get("/api/payments/buyer/:email", async (req, res) => {
       try {
         const buyerOrders = await ordersCollection
           .find({ "buyerInfo.email": req.params.email })
           .toArray();
-
         if (buyerOrders.length === 0) return res.json([]);
-
         const orderIds = buyerOrders.map((o) => o._id.toString());
-
         const payments = await paymentsCollection
           .find({ orderId: { $in: orderIds } })
           .sort({ createdAt: -1 })
           .toArray();
-
         const enriched = payments.map((payment) => {
           const order = buyerOrders.find(
             (o) => o._id.toString() === payment.orderId,
           );
-
-          // ── Derive the correct paymentStatus from order state ──────────────────
           let paymentStatus = payment.paymentStatus;
-
           if (order) {
             if (order.orderStatus === "cancelled") {
-              // cancelled always means refunded (refund was issued on cancel)
               paymentStatus = "refunded";
             } else if (
               ["pending", "accepted", "shipped", "delivered"].includes(
                 order.orderStatus,
               )
             ) {
-              // active order = paid
               paymentStatus = "paid";
             }
           }
-
           return {
             ...payment,
             paymentStatus,
@@ -567,7 +596,6 @@ async function run() {
             orderStatus: order?.orderStatus || "—",
           };
         });
-
         res.json(enriched);
       } catch (err) {
         res.status(500).json({ error: err.message });
@@ -660,19 +688,73 @@ async function run() {
       }
     });
 
-    // ─── Admin Overview ───────────────────────────────────────────────────────────
+    // ─── Admin Overview ───────────────────────────────────────────────────────
+
     app.get("/api/admin/overview", async (req, res) => {
       try {
-        const db = client.db("reselll_hub_db");
-        const usersCollection = db.collection("user"); // ← better-auth saves users here
-
         const [totalUsers, totalProducts, totalOrders] = await Promise.all([
           usersCollection.countDocuments(),
           sellerCollection.countDocuments(),
           ordersCollection.countDocuments(),
         ]);
-
         res.json({ totalUsers, totalProducts, totalOrders });
+      } catch (err) {
+        res.status(500).json({ error: err.message });
+      }
+    });
+
+    // ─── Admin Users ──────────────────────────────────────────────────────────
+
+    app.get("/api/admin/users", async (req, res) => {
+      try {
+        const users = await usersCollection
+          .find({})
+          .sort({ createdAt: -1 })
+          .toArray();
+        res.json(users);
+      } catch (err) {
+        res.status(500).json({ error: err.message });
+      }
+    });
+
+    // ✅ Block/unblock user — wipes active sessions when blocking.
+    //
+    // FIXED: this user collection has NO separate `id` field — only `_id`.
+    // better-auth's session.userId stores the Mongo _id as a string, so the
+    // session-wipe query must match on that, not on a nonexistent `user.id`.
+    app.patch("/api/admin/users/:id/status", async (req, res) => {
+      try {
+        const { status } = req.body; // "active" or "blocked"
+        const userObjectId = new ObjectId(req.params.id);
+
+        // 1. Update the user's status
+        await usersCollection.updateOne(
+          { _id: userObjectId },
+          { $set: { status, updatedAt: new Date() } },
+        );
+
+        // 2. If blocking, delete all of this user's active sessions so any
+        // existing logged-in tab/device is kicked out immediately, not just
+        // blocked from creating *new* sessions.
+        if (status === "blocked") {
+          await sessionsCollection.deleteMany({
+            userId: req.params.id, // session.userId is the _id as a string
+          });
+        }
+
+        res.json({ success: true });
+      } catch (err) {
+        res.status(500).json({ error: err.message });
+      }
+    });
+
+    app.delete("/api/admin/users/:id", async (req, res) => {
+      try {
+        const userObjectId = new ObjectId(req.params.id);
+        const result = await usersCollection.deleteOne({ _id: userObjectId });
+        // Clean up any lingering sessions for a deleted user too.
+        await sessionsCollection.deleteMany({ userId: req.params.id });
+        res.json(result);
       } catch (err) {
         res.status(500).json({ error: err.message });
       }
