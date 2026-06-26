@@ -22,6 +22,36 @@ const client = new MongoClient(uri, {
   },
 });
 
+// ── Shared refund helper ──────────────────────────────────────────────────────
+async function issueRefund(orderId, paymentsCollection, ordersCollection) {
+  const payment = await paymentsCollection.findOne({ orderId });
+  if (!payment) return { skipped: true, reason: "no payment found" };
+  if (payment.paymentStatus === "refunded") return { skipped: true, reason: "already refunded" };
+  if (!payment.transactionId) return { skipped: true, reason: "no transactionId" };
+
+  const refund = await stripe.refunds.create({
+    payment_intent: payment.transactionId,
+  });
+
+  await paymentsCollection.updateOne(
+    { _id: payment._id },
+    {
+      $set: {
+        paymentStatus: "refunded",
+        refundId: refund.id,
+        refundedAt: new Date(),
+      },
+    }
+  );
+
+  await ordersCollection.updateOne(
+    { orderId },
+    { $set: { paymentStatus: "refunded" } }
+  );
+
+  return { success: true, refundId: refund.id };
+}
+
 async function run() {
   try {
     await client.connect();
@@ -217,7 +247,7 @@ async function run() {
       }
     });
 
-    // ─── Stripe ───────────────────────────────────────────────────────────────
+    // ─── Stripe checkout ──────────────────────────────────────────────────────
 
     app.post("/api/create-checkout-session", async (req, res) => {
       const {
@@ -304,7 +334,7 @@ async function run() {
           productTitle: meta.productTitle,
           price: parseFloat(meta.price),
           paymentStatus: "paid",
-          orderStatus: "pending", // ← FIXED: was "processing"
+          orderStatus: "pending",
           stripeSessionId: sessionId,
           createdAt: new Date(),
         };
@@ -314,7 +344,7 @@ async function run() {
           orderId,
           transactionId: session.payment_intent,
           amount: session.amount_total / 100,
-          paymentStatus: "success",
+          paymentStatus: "paid", // ← "paid" not "success"
           stripeSessionId: sessionId,
           createdAt: new Date(),
         });
@@ -329,8 +359,7 @@ async function run() {
       }
     });
 
-    // ─── Orders ───────────────────────────────────────────────────────────────
-    // IMPORTANT: specific routes must come before /api/orders/:id
+    // ─── Orders — specific routes BEFORE /:id ────────────────────────────────
 
     app.get("/api/orders/buyer/:email", async (req, res) => {
       try {
@@ -356,7 +385,6 @@ async function run() {
       }
     });
 
-    // GET single order — AFTER the specific routes above
     app.get("/api/orders/:id", async (req, res) => {
       try {
         const result = await ordersCollection.findOne({
@@ -369,7 +397,7 @@ async function run() {
       }
     });
 
-    // PATCH cancel order — buyer cancels while still "pending"
+    // PATCH — buyer cancels (only when pending) → auto refund
     app.patch("/api/orders/:id/cancel", async (req, res) => {
       try {
         const order = await ordersCollection.findOne({
@@ -377,25 +405,52 @@ async function run() {
         });
         if (!order) return res.status(404).json({ error: "Order not found" });
         if (order.orderStatus !== "pending") {
-          return res.status(400).json({
-            error: `Cannot cancel an order with status: ${order.orderStatus}`,
-          });
+          return res
+            .status(400)
+            .json({
+              error: `Cannot cancel an order with status: ${order.orderStatus}`,
+            });
         }
+
         await ordersCollection.updateOne(
           { _id: new ObjectId(req.params.id) },
-          { $set: { orderStatus: "cancelled", updatedAt: new Date() } },
+          {
+            $set: {
+              orderStatus: "cancelled",
+              paymentStatus: "refunded",
+              updatedAt: new Date(),
+            },
+          },
         );
+
+        // Auto refund
+        let refundResult = null;
+        try {
+          refundResult = await issueRefund(
+            order._id.toString(),
+            paymentsCollection,
+            ordersCollection,
+          );
+        } catch (refundErr) {
+          console.error(
+            "Auto-refund failed (buyer cancel):",
+            refundErr.message,
+          );
+        }
+
+        // Restore product
         await sellerCollection.updateOne(
           { _id: new ObjectId(order.productId) },
           { $set: { status: "available" } },
         );
-        res.json({ success: true });
+
+        res.json({ success: true, refund: refundResult });
       } catch (err) {
         res.status(500).json({ error: err.message });
       }
     });
 
-    // PATCH seller updates order status
+    // PATCH — seller updates order status → auto refund on cancel/reject
     app.patch("/api/orders/:id/status", async (req, res) => {
       try {
         const { status } = req.body;
@@ -409,6 +464,7 @@ async function run() {
         if (!ALLOWED.includes(status)) {
           return res.status(400).json({ error: `Invalid status: ${status}` });
         }
+
         const order = await ordersCollection.findOne({
           _id: new ObjectId(req.params.id),
         });
@@ -422,18 +478,44 @@ async function run() {
           cancelled: [],
         };
 
-        const current = order.orderStatus;
-        if (!TRANSITIONS[current]?.includes(status)) {
-          return res
-            .status(400)
-            .json({ error: `Cannot move from "${current}" to "${status}"` });
+        if (!TRANSITIONS[order.orderStatus]?.includes(status)) {
+          return res.status(400).json({
+            error: `Cannot move from "${order.orderStatus}" to "${status}"`,
+          });
         }
+
+        // Build the update fields
+        const updateFields = { orderStatus: status, updatedAt: new Date() };
+        if (status === "cancelled") updateFields.paymentStatus = "refunded";
 
         await ordersCollection.updateOne(
           { _id: new ObjectId(req.params.id) },
-          { $set: { orderStatus: status, updatedAt: new Date() } },
+          { $set: updateFields },
         );
-        res.json({ success: true, orderStatus: status });
+
+        // If seller rejects → auto refund + restore product
+        let refundResult = null;
+        if (status === "cancelled") {
+          try {
+            refundResult = await issueRefund(
+              order._id.toString(),
+              paymentsCollection,
+              ordersCollection,
+            );
+          } catch (refundErr) {
+            console.error(
+              "Auto-refund failed (seller cancel):",
+              refundErr.message,
+            );
+          }
+
+          await sellerCollection.updateOne(
+            { _id: new ObjectId(order.productId) },
+            { $set: { status: "available" } },
+          );
+        }
+
+        res.json({ success: true, orderStatus: status, refund: refundResult });
       } catch (err) {
         res.status(500).json({ error: err.message });
       }
@@ -441,27 +523,53 @@ async function run() {
 
     // ─── Payments ─────────────────────────────────────────────────────────────
 
+    // Replace your existing /api/payments/buyer/:email endpoint
+
     app.get("/api/payments/buyer/:email", async (req, res) => {
       try {
         const buyerOrders = await ordersCollection
           .find({ "buyerInfo.email": req.params.email })
           .toArray();
+
         if (buyerOrders.length === 0) return res.json([]);
+
         const orderIds = buyerOrders.map((o) => o._id.toString());
+
         const payments = await paymentsCollection
           .find({ orderId: { $in: orderIds } })
           .sort({ createdAt: -1 })
           .toArray();
+
         const enriched = payments.map((payment) => {
           const order = buyerOrders.find(
             (o) => o._id.toString() === payment.orderId,
           );
+
+          // ── Derive the correct paymentStatus from order state ──────────────────
+          let paymentStatus = payment.paymentStatus;
+
+          if (order) {
+            if (order.orderStatus === "cancelled") {
+              // cancelled always means refunded (refund was issued on cancel)
+              paymentStatus = "refunded";
+            } else if (
+              ["pending", "accepted", "shipped", "delivered"].includes(
+                order.orderStatus,
+              )
+            ) {
+              // active order = paid
+              paymentStatus = "paid";
+            }
+          }
+
           return {
             ...payment,
+            paymentStatus,
             productTitle: order?.productTitle || "Unknown product",
             orderStatus: order?.orderStatus || "—",
           };
         });
+
         res.json(enriched);
       } catch (err) {
         res.status(500).json({ error: err.message });
@@ -489,24 +597,19 @@ async function run() {
       }
     });
 
-    // GET seller analytics
+    // ─── Seller Analytics ─────────────────────────────────────────────────────
+
     app.get("/api/seller/analytics/:email", async (req, res) => {
       try {
         const email = req.params.email;
-
-        // All delivered/shipped orders for this seller
         const orders = await ordersCollection
           .find({
             "sellerInfo.email": email,
             orderStatus: { $in: ["delivered", "shipped", "accepted"] },
           })
           .toArray();
-
-        // Total revenue & total orders
         const totalRevenue = orders.reduce((sum, o) => sum + (o.price || 0), 0);
         const totalOrders = orders.length;
-
-        // Monthly sales trend (last 6 months)
         const now = new Date();
         const monthly = [];
         for (let i = 5; i >= 0; i--) {
@@ -528,8 +631,6 @@ async function run() {
             orders: monthOrders.length,
           });
         }
-
-        // Top selling products (by number of orders)
         const productMap = {};
         orders.forEach((o) => {
           const key = o.productTitle || "Unknown";
@@ -541,18 +642,14 @@ async function run() {
         const topProducts = Object.values(productMap)
           .sort((a, b) => b.orders - a.orders)
           .slice(0, 5);
-
-        // Order status breakdown
         const allOrders = await ordersCollection
           .find({ "sellerInfo.email": email })
           .toArray();
-
         const statusBreakdown = allOrders.reduce((acc, o) => {
           const s = o.orderStatus || "pending";
           acc[s] = (acc[s] || 0) + 1;
           return acc;
         }, {});
-
         res.json({
           totalRevenue,
           totalOrders,
@@ -576,5 +673,4 @@ async function run() {
 run().catch(console.dir);
 
 app.get("/", (req, res) => res.send("Hello World!"));
-
 app.listen(port, () => console.log(`Example app listening on port ${port}`));
