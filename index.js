@@ -1088,6 +1088,88 @@ async function run() {
       }
     });
 
+    app.get("/api/admin/payments", async (req, res) => {
+      try {
+        const { status, search } = req.query;
+
+        // Get all payments
+        let payments = await paymentsCollection
+          .find({})
+          .sort({ createdAt: -1 })
+          .toArray();
+
+        // Enrich each payment with order + user info
+        const orderIds = payments.map((p) => p.orderId);
+        const orders = await ordersCollection
+          .find({
+            _id: {
+              $in: orderIds
+                .map((id) => {
+                  try {
+                    return new ObjectId(id);
+                  } catch {
+                    return null;
+                  }
+                })
+                .filter(Boolean),
+            },
+          })
+          .toArray();
+
+        const enriched = payments.map((payment) => {
+          const order = orders.find(
+            (o) => o._id.toString() === payment.orderId,
+          );
+          return {
+            ...payment,
+            productTitle: order?.productTitle || "Unknown product",
+            orderStatus: order?.orderStatus || "—",
+            buyerInfo: order?.buyerInfo || null,
+            sellerInfo: order?.sellerInfo || null,
+          };
+        });
+
+        // Filter by status
+        let filtered = enriched;
+        if (status)
+          filtered = filtered.filter((p) => p.paymentStatus === status);
+
+        // Search by product, buyer email, seller email, transactionId
+        if (search) {
+          const s = search.toLowerCase();
+          filtered = filtered.filter(
+            (p) =>
+              p.productTitle?.toLowerCase().includes(s) ||
+              p.buyerInfo?.email?.toLowerCase().includes(s) ||
+              p.sellerInfo?.email?.toLowerCase().includes(s) ||
+              p.transactionId?.toLowerCase().includes(s),
+          );
+        }
+
+        // Summary stats
+        const totalRevenue = enriched
+          .filter((p) => p.paymentStatus === "paid")
+          .reduce((sum, p) => sum + (p.amount || 0), 0);
+        const totalRefunded = enriched
+          .filter((p) => p.paymentStatus === "refunded")
+          .reduce((sum, p) => sum + (p.amount || 0), 0);
+
+        res.json({
+          payments: filtered,
+          stats: {
+            total: enriched.length,
+            paid: enriched.filter((p) => p.paymentStatus === "paid").length,
+            refunded: enriched.filter((p) => p.paymentStatus === "refunded")
+              .length,
+            totalRevenue,
+            totalRefunded,
+          },
+        });
+      } catch (err) {
+        res.status(500).json({ error: err.message });
+      }
+    });
+
     await client.db("admin").command({ ping: 1 });
     console.log(
       "Pinged your deployment. You successfully connected to MongoDB!",
