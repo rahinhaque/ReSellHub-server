@@ -102,22 +102,46 @@ async function run() {
     // Replace the existing /api/products route
     // Replace the existing /api/products route
     app.get("/api/products", async (req, res) => {
-      const { category, condition, search, sort } = req.query;
+      const {
+        category,
+        condition,
+        search,
+        sort,
+        page = 1,
+        limit = 10,
+      } = req.query;
       const query = {
         status: "available",
-        moderationStatus: "approved", // ← only approved products are public
+        moderationStatus: "approved",
       };
       if (category) query.category = category;
       if (condition) query.condition = condition;
       if (search) query.title = { $regex: search, $options: "i" };
+
       let sortOption = { createdAt: -1 };
       if (sort === "price_asc") sortOption = { price: 1 };
       if (sort === "price_desc") sortOption = { price: -1 };
-      const result = await sellerCollection
-        .find(query)
-        .sort(sortOption)
-        .toArray();
-      res.send(result);
+
+      const pageNum = Math.max(1, parseInt(page));
+      const limitNum = Math.max(1, parseInt(limit));
+      const skip = (pageNum - 1) * limitNum;
+
+      const [result, total] = await Promise.all([
+        sellerCollection
+          .find(query)
+          .sort(sortOption)
+          .skip(skip)
+          .limit(limitNum)
+          .toArray(),
+        sellerCollection.countDocuments(query),
+      ]);
+
+      res.json({
+        products: result,
+        total,
+        page: pageNum,
+        totalPages: Math.ceil(total / limitNum),
+      });
     });
 
     app.get("/api/products/:id", async (req, res) => {
