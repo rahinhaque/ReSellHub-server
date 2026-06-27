@@ -905,6 +905,189 @@ async function run() {
       }
     });
 
+    // GET all orders (admin)
+    app.get("/api/admin/orders", async (req, res) => {
+      try {
+        const { status, search } = req.query;
+        const query = {};
+        if (status) query.orderStatus = status;
+        if (search) {
+          query.$or = [
+            { productTitle: { $regex: search, $options: "i" } },
+            { "buyerInfo.email": { $regex: search, $options: "i" } },
+            { "sellerInfo.email": { $regex: search, $options: "i" } },
+          ];
+        }
+        const result = await ordersCollection
+          .find(query)
+          .sort({ createdAt: -1 })
+          .toArray();
+        res.json(result);
+      } catch (err) {
+        res.status(500).json({ error: err.message });
+      }
+    });
+
+    // PATCH — admin force-updates any order to any status + optional refund
+    app.patch("/api/admin/orders/:id/resolve", async (req, res) => {
+      try {
+        const { orderStatus, issueRefundNow } = req.body;
+
+        const ALLOWED = [
+          "pending",
+          "accepted",
+          "shipped",
+          "delivered",
+          "cancelled",
+        ];
+        if (!ALLOWED.includes(orderStatus)) {
+          return res.status(400).json({ error: "Invalid status" });
+        }
+
+        const order = await ordersCollection.findOne({
+          _id: new ObjectId(req.params.id),
+        });
+        if (!order) return res.status(404).json({ error: "Order not found" });
+
+        // Admin can force any transition — no TRANSITIONS check
+        await ordersCollection.updateOne(
+          { _id: new ObjectId(req.params.id) },
+          {
+            $set: {
+              orderStatus,
+              updatedAt: new Date(),
+              adminResolved: true,
+              ...(orderStatus === "cancelled" && { paymentStatus: "refunded" }),
+            },
+          },
+        );
+
+        // Restore product if cancelled
+        if (orderStatus === "cancelled") {
+          await sellerCollection.updateOne(
+            { _id: new ObjectId(order.productId) },
+            { $set: { status: "available" } },
+          );
+        }
+
+        // Issue refund if requested
+        let refundResult = null;
+        if (issueRefundNow) {
+          try {
+            refundResult = await issueRefund(
+              order._id.toString(),
+              paymentsCollection,
+              ordersCollection,
+            );
+          } catch (err) {
+            console.error("Admin refund failed:", err.message);
+            refundResult = { skipped: true, reason: err.message };
+          }
+        }
+
+        res.json({ success: true, orderStatus, refund: refundResult });
+      } catch (err) {
+        res.status(500).json({ error: err.message });
+      }
+    });
+
+    app.get("/api/admin/analytics", async (req, res) => {
+      try {
+        const now = new Date();
+
+        // ── Monthly data (last 6 months) ──────────────────────────────────────
+        const monthly = [];
+        for (let i = 5; i >= 0; i--) {
+          const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+          const nextMonth = new Date(
+            now.getFullYear(),
+            now.getMonth() - i + 1,
+            1,
+          );
+          const label = d.toLocaleString("en-US", {
+            month: "short",
+            year: "2-digit",
+          });
+
+          const [newUsers, newOrders] = await Promise.all([
+            usersCollection.countDocuments({
+              createdAt: { $gte: d, $lt: nextMonth },
+            }),
+            ordersCollection.countDocuments({
+              createdAt: { $gte: d, $lt: nextMonth },
+            }),
+          ]);
+
+          const revenueOrders = await ordersCollection
+            .find({
+              createdAt: { $gte: d, $lt: nextMonth },
+              orderStatus: "delivered",
+            })
+            .toArray();
+
+          monthly.push({
+            month: label,
+            users: newUsers,
+            orders: newOrders,
+            revenue: revenueOrders.reduce((sum, o) => sum + (o.price || 0), 0),
+          });
+        }
+
+        // ── Category performance ───────────────────────────────────────────────
+        const allProducts = await sellerCollection.find({}).toArray();
+        const categoryMap = {};
+        allProducts.forEach((p) => {
+          const cat = p.category || "Uncategorized";
+          if (!categoryMap[cat])
+            categoryMap[cat] = { category: cat, products: 0, sold: 0 };
+          categoryMap[cat].products += 1;
+          if (p.status === "sold") categoryMap[cat].sold += 1;
+        });
+        const categoryPerformance = Object.values(categoryMap)
+          .sort((a, b) => b.products - a.products)
+          .slice(0, 6);
+
+        // ── Platform summary ───────────────────────────────────────────────────
+        const [totalUsers, totalProducts, totalOrders] = await Promise.all([
+          usersCollection.countDocuments(),
+          sellerCollection.countDocuments(),
+          ordersCollection.countDocuments(),
+        ]);
+
+        const allOrders = await ordersCollection.find({}).toArray();
+        const totalRevenue = allOrders
+          .filter((o) => o.orderStatus === "delivered")
+          .reduce((sum, o) => sum + (o.price || 0), 0);
+
+        const orderStatusBreakdown = allOrders.reduce((acc, o) => {
+          const s = o.orderStatus || "pending";
+          acc[s] = (acc[s] || 0) + 1;
+          return acc;
+        }, {});
+
+        // ── User roles breakdown ───────────────────────────────────────────────
+        const allUsers = await usersCollection.find({}).toArray();
+        const userRoles = allUsers.reduce((acc, u) => {
+          const r = u.role || "buyer";
+          acc[r] = (acc[r] || 0) + 1;
+          return acc;
+        }, {});
+
+        res.json({
+          monthly,
+          categoryPerformance,
+          totalUsers,
+          totalProducts,
+          totalOrders,
+          totalRevenue,
+          orderStatusBreakdown,
+          userRoles,
+        });
+      } catch (err) {
+        res.status(500).json({ error: err.message });
+      }
+    });
+
     await client.db("admin").command({ ping: 1 });
     console.log(
       "Pinged your deployment. You successfully connected to MongoDB!",
