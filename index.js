@@ -141,6 +141,38 @@ async function run() {
       };
     }
 
+    // In your server.js, inside the run() function
+    app.patch("/api/user/set-role", verifyToken, async (req, res) => {
+      try {
+        const { email, role, roleSelected } = req.body;
+        const ALLOWED_ROLES = ["buyer", "seller"];
+
+        if (!ALLOWED_ROLES.includes(role)) {
+          return res.status(400).json({ error: "Invalid role" });
+        }
+
+        // Security: users can only update their own role
+        if (req.user.email !== email) {
+          return res.status(403).json({ error: "Forbidden" });
+        }
+
+        await usersCollection.updateOne(
+          { email },
+          {
+            $set: {
+              role,
+              roleSelected: roleSelected ?? true,
+              updatedAt: new Date(),
+            },
+          },
+        );
+
+        res.json({ success: true, role });
+      } catch (err) {
+        res.status(500).json({ error: err.message });
+      }
+    });
+
     // ── Active user check (by email from body) ────────────────────────────────
     async function requireActiveUserByEmail(email) {
       if (!email) return { ok: false, status: 400, error: "Email required" };
@@ -341,11 +373,9 @@ async function run() {
             sellerInfo,
           } = req.body;
           if (!productId || (!userId && !userEmail)) {
-            return res
-              .status(400)
-              .json({
-                error: "productId and userId or userEmail are required",
-              });
+            return res.status(400).json({
+              error: "productId and userId or userEmail are required",
+            });
           }
 
           if (userEmail) {
@@ -610,11 +640,9 @@ async function run() {
           });
           if (!order) return res.status(404).json({ error: "Order not found" });
           if (order.orderStatus !== "pending") {
-            return res
-              .status(400)
-              .json({
-                error: `Cannot cancel an order with status: ${order.orderStatus}`,
-              });
+            return res.status(400).json({
+              error: `Cannot cancel an order with status: ${order.orderStatus}`,
+            });
           }
           await ordersCollection.updateOne(
             { _id: new ObjectId(req.params.id) },
@@ -681,11 +709,9 @@ async function run() {
             cancelled: [],
           };
           if (!TRANSITIONS[order.orderStatus]?.includes(status)) {
-            return res
-              .status(400)
-              .json({
-                error: `Cannot move from "${order.orderStatus}" to "${status}"`,
-              });
+            return res.status(400).json({
+              error: `Cannot move from "${order.orderStatus}" to "${status}"`,
+            });
           }
 
           const updateFields = { orderStatus: status, updatedAt: new Date() };
@@ -1050,11 +1076,9 @@ async function run() {
         const { productId, productTitle, reporterEmail, reason, details } =
           req.body;
         if (!productId || !reporterEmail || !reason) {
-          return res
-            .status(400)
-            .json({
-              error: "productId, reporterEmail and reason are required",
-            });
+          return res.status(400).json({
+            error: "productId, reporterEmail and reason are required",
+          });
         }
         const existing = await reportsCollection.findOne({
           productId,
