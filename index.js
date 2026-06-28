@@ -10,14 +10,15 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const jwt = require("jsonwebtoken");
 const JWT_SECRET = process.env.JWT_SECRET;
 
+// Replace app.use(cors()) with this
 app.use(
   cors({
     origin: [
       "http://localhost:3000",
-      "https://re-sell-hub-client-omega.vercel.app/",
+      "https://re-sell-hub-client-omega.vercel.app",
     ],
     credentials: true,
-  }),
+  })
 );
 app.use(express.json());
 
