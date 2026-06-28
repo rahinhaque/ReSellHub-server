@@ -10,7 +10,15 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const jwt = require("jsonwebtoken");
 const JWT_SECRET = process.env.JWT_SECRET;
 
-app.use(cors());
+app.use(
+  cors({
+    origin: [
+      "http://localhost:3000",
+      "https://re-sell-hub-client-omega.vercel.app/",
+    ],
+    credentials: true,
+  }),
+);
 app.use(express.json());
 
 const { MongoClient, ServerApiVersion } = require("mongodb");
