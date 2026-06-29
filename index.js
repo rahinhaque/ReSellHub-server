@@ -250,15 +250,39 @@ async function run() {
     });
 
     // PRIVATE — seller sees their own products
+    // UPDATED — with search and condition filtering
     app.get(
       "/api/sellerProducts/:email",
       verifyToken,
       requireRole("seller", "admin"),
       async (req, res) => {
-        const result = await sellerCollection
-          .find({ "sellerInfo.email": req.params.email })
-          .toArray();
-        res.send(result);
+        try {
+          const { search, condition } = req.query;
+          const query = { "sellerInfo.email": req.params.email };
+
+          if (search) {
+            query.$or = [
+              { title: { $regex: search, $options: "i" } },
+              { category: { $regex: search, $options: "i" } },
+            ];
+          }
+
+          if (condition) {
+            // Handle both "like_new" and "Like New" formats from DB
+            const conditionVariants = [
+              condition,
+              condition.replace(/_/g, " "),
+              condition.charAt(0).toUpperCase() +
+                condition.slice(1).replace(/_/g, " "),
+            ];
+            query.condition = { $in: conditionVariants };
+          }
+
+          const result = await sellerCollection.find(query).toArray();
+          res.send(result);
+        } catch (err) {
+          res.status(500).json({ error: err.message });
+        }
       },
     );
 
